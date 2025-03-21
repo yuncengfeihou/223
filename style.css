@@ -1,29 +1,35 @@
-.prompt-struct-exporter-settings .flex-container {
-    display: flex;
-    align-items: center;
-    margin-bottom: 8px;
+.prompt-exporter-settings {
+    margin: 10px 0;
 }
 
-.prompt-struct-exporter-settings .menu_button {
-    background-color: #2d91ee;
+.prompt-exporter-block {
+    padding: 10px;
+    flex-direction: column;
+    gap: 10px;
+}
+
+#prompt_exporter_last_time {
+    color: #888;
+    font-style: italic;
+    font-size: 0.9em;
+    margin-top: 5px;
+}
+
+#prompt_exporter_export {
+    background-color: #4CAF50;
     color: white;
-    padding: 8px 12px;
+    padding: 8px 15px;
     border: none;
     border-radius: 5px;
     cursor: pointer;
     transition: background-color 0.3s;
 }
 
-.prompt-struct-exporter-settings .menu_button:hover {
-    background-color: #1a70c7;
+#prompt_exporter_export:hover {
+    background-color: #45a049;
 }
 
-#last_export_info {
-    color: #aaa;
-    font-style: italic;
-}
-
-.prompt-struct-exporter-settings label {
-    margin-right: 10px;
-    cursor: pointer;
+.checkbox_label {
+    align-items: center;
+    gap: 10px;
 }
