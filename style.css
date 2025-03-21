@@ -1,0 +1,29 @@
+.prompt-struct-exporter-settings .flex-container {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.prompt-struct-exporter-settings .menu_button {
+    background-color: #2d91ee;
+    color: white;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+.prompt-struct-exporter-settings .menu_button:hover {
+    background-color: #1a70c7;
+}
+
+#last_export_info {
+    color: #aaa;
+    font-style: italic;
+}
+
+.prompt-struct-exporter-settings label {
+    margin-right: 10px;
+    cursor: pointer;
+}
