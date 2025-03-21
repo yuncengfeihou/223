@@ -58,6 +58,38 @@ function updateLastExportTime() {
     }
 }
 
+// 处理JSON序列化中的循环引用问题
+function stringifyWithCircularRefs() {
+    const seen = new WeakSet();
+    return (key, value) => {
+        // 处理Buffer对象
+        if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
+            return {
+                _type: 'Buffer',
+                data: Array.from(value.data)
+            };
+        }
+        
+        // 处理Date对象
+        if (value instanceof Date) {
+            return {
+                _type: 'Date',
+                value: value.toISOString()
+            };
+        }
+        
+        // 处理循环引用
+        if (typeof value === 'object' && value !== null) {
+            if (seen.has(value)) {
+                return '[Circular Reference]';
+            }
+            seen.add(value);
+        }
+        
+        return value;
+    };
+}
+
 // 导出数据到文件
 function exportPromptStructure(data) {
     try {
@@ -72,26 +104,8 @@ function exportPromptStructure(data) {
         const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
         const filename = `prompt_structure_${timestamp}.json`;
         
-        // 创建JSON字符串，处理循环引用和特殊对象
-        const jsonData = JSON.stringify(data, (key, value) => {
-            // 处理Buffer对象
-            if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
-                return {
-                    _type: 'Buffer',
-                    data: Array.from(value.data)
-                };
-            }
-            
-            // 处理Date对象
-            if (value instanceof Date) {
-                return {
-                    _type: 'Date',
-                    value: value.toISOString()
-                };
-            }
-            
-            return value;
-        }, 2);
+        // 创建JSON字符串，处理循环引用
+        const jsonData = JSON.stringify(data, stringifyWithCircularRefs(), 2);
         
         // 创建Blob对象
         const blob = new Blob([jsonData], { type: 'application/json' });
@@ -155,17 +169,232 @@ function onDebugModeChange() {
     logInfo(`调试模式${extension_settings[extensionName].debugMode ? '已启用' : '已禁用'}`);
 }
 
+// 安全地定义插件API
+function definePluginAPI() {
+    try {
+        // 确保全局命名空间存在
+        window.SillyTavern = window.SillyTavern || {};
+        window.SillyTavern.Extensions = window.SillyTavern.Extensions || {};
+        
+        // 已经存在则不覆盖
+        if (window.SillyTavern.Extensions[extensionName]) {
+            logInfo("插件API已经存在，不再重复定义");
+            return;
+        }
+        
+        // 定义插件接口
+        window.SillyTavern.Extensions[extensionName] = {
+            name: "Prompt结构导出插件",
+            // 插件接口定义
+            interfaces: {
+                chat: {
+                    // 通过ReplyHandler捕获提示词结构
+                    ReplyHandler: (reply, args) => {
+                        if (!extension_settings[extensionName].enabled) {
+                            return false; // 不阻断正常流程
+                        }
+                        
+                        try {
+                            const debugMode = extension_settings[extensionName].debugMode;
+                            
+                            if (debugMode) {
+                                logInfo("ReplyHandler被调用");
+                                console.log("Reply:", reply);
+                                console.log("Args:", args);
+                            }
+                            
+                            // 如果包含prompt_struct，保存它
+                            if (args.prompt_struct) {
+                                logInfo("从ReplyHandler捕获到提示词结构");
+                                
+                                // 深拷贝提示词结构，避免修改原始对象
+                                const promptStructCopy = JSON.parse(JSON.stringify(args.prompt_struct));
+                                
+                                // 保存最新的提示词数据
+                                lastExportData = {
+                                    timestamp: new Date().toISOString(),
+                                    prompt_structure: promptStructCopy,
+                                    source: "ReplyHandler"
+                                };
+                                
+                                // 如果启用了自动导出，则自动导出
+                                if (extension_settings[extensionName].autoExport) {
+                                    logInfo("自动导出已启用，正在导出数据...");
+                                    exportPromptStructure(lastExportData);
+                                }
+                            } else if (debugMode) {
+                                logWarning("ReplyHandler未找到prompt_struct");
+                            }
+                            
+                        } catch (error) {
+                            logError(`ReplyHandler出错: ${error.message}`, error);
+                        }
+                        
+                        return false; // 不阻断正常流程
+                    }
+                }
+            }
+        };
+        
+        logInfo("插件API定义完成");
+    } catch (error) {
+        logError(`定义插件API出错: ${error.message}`, error);
+    }
+}
+
+// 尝试在页面上显示调试信息
+function createDebugPanel() {
+    if (!extension_settings[extensionName].debugMode) {
+        return;
+    }
+    
+    // 如果已存在调试面板，则不再创建
+    if ($("#prompt_exporter_debug_panel").length > 0) {
+        return;
+    }
+    
+    const debugPanelHtml = `
+    <div id="prompt_exporter_debug_panel" class="prompt-exporter-debug-panel">
+        <div class="prompt-exporter-debug-header">
+            <h3>提示词结构导出 - 调试面板</h3>
+            <button id="prompt_exporter_debug_close" class="prompt-exporter-debug-close">X</button>
+        </div>
+        <div class="prompt-exporter-debug-content">
+            <div class="prompt-exporter-debug-info">未捕获到数据</div>
+        </div>
+    </div>`;
+    
+    $("body").append(debugPanelHtml);
+    
+    // 绑定关闭按钮事件
+    $("#prompt_exporter_debug_close").on("click", () => {
+        $("#prompt_exporter_debug_panel").hide();
+    });
+    
+    // 默认隐藏
+    $("#prompt_exporter_debug_panel").hide();
+}
+
+// 更新调试面板内容
+function updateDebugPanel() {
+    if (!extension_settings[extensionName].debugMode) {
+        return;
+    }
+    
+    const $debugPanel = $("#prompt_exporter_debug_panel");
+    if ($debugPanel.length === 0) {
+        return;
+    }
+    
+    if (!lastExportData) {
+        $debugPanel.find(".prompt-exporter-debug-info").text("未捕获到数据");
+        return;
+    }
+    
+    let debugInfo = "捕获到提示词结构:\n\n";
+    
+    try {
+        const promptStruct = lastExportData.prompt_structure;
+        
+        if (promptStruct.char_prompt) {
+            debugInfo += `角色提示词: ${promptStruct.char_prompt.text?.length || 0} 个文本段落\n`;
+            
+            if (promptStruct.char_prompt.text) {
+                promptStruct.char_prompt.text.forEach((text, index) => {
+                    debugInfo += `  - 文本段落 ${index+1}: ${text.description}, 重要度: ${text.important}\n`;
+                });
+            }
+        }
+        
+        if (promptStruct.user_prompt) {
+            debugInfo += `\n用户提示词: ${promptStruct.user_prompt.text?.length || 0} 个文本段落\n`;
+        }
+        
+        if (promptStruct.world_prompt) {
+            debugInfo += `\n世界提示词: ${promptStruct.world_prompt.text?.length || 0} 个文本段落\n`;
+        }
+        
+        if (promptStruct.chat_log) {
+            debugInfo += `\n聊天记录: ${promptStruct.chat_log.length} 条消息\n`;
+            
+            // 检查角色定义问题
+            const problemEntries = promptStruct.chat_log.filter(entry => !entry.role || entry.role === 'undefined');
+            if (problemEntries.length > 0) {
+                debugInfo += `警告: 发现 ${problemEntries.length} 条没有角色定义的聊天记录项\n`;
+            }
+        }
+    } catch (error) {
+        debugInfo += `解析提示词结构出错: ${error.message}\n`;
+    }
+    
+    $debugPanel.find(".prompt-exporter-debug-content").html(`<pre>${debugInfo}</pre>`);
+    $debugPanel.show();
+}
+
+// 安全地设置事件监听器
+function setupEventListeners() {
+    try {
+        // 监听提示词就绪事件
+        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, (eventData) => {
+            if (!extension_settings[extensionName].enabled) {
+                return;
+            }
+            
+            const debugMode = extension_settings[extensionName].debugMode;
+            
+            if (debugMode) {
+                logInfo("CHAT_COMPLETION_PROMPT_READY事件触发");
+                console.log("事件数据:", eventData);
+            }
+            
+            // 尝试从事件中提取提示词结构
+            if (eventData && (eventData.prompt_struct || eventData.promptStruct)) {
+                const promptStruct = eventData.prompt_struct || eventData.promptStruct;
+                
+                if (promptStruct) {
+                    logInfo("从事件中捕获到提示词结构");
+                    
+                    // 深拷贝提示词结构，避免修改原始对象
+                    try {
+                        const promptStructCopy = JSON.parse(JSON.stringify(promptStruct));
+                        
+                        lastExportData = {
+                            timestamp: new Date().toISOString(),
+                            prompt_structure: promptStructCopy,
+                            source: "CHAT_COMPLETION_PROMPT_READY"
+                        };
+                        
+                        if (extension_settings[extensionName].autoExport) {
+                            exportPromptStructure(lastExportData);
+                        }
+                        
+                        updateDebugPanel();
+                    } catch (error) {
+                        logError(`复制提示词结构时出错: ${error.message}`, error);
+                    }
+                }
+            } else if (debugMode) {
+                logWarning("事件中未找到提示词结构");
+            }
+        });
+        
+        logInfo("事件监听器设置完成");
+    } catch (error) {
+        logError(`设置事件监听器出错: ${error.message}`, error);
+    }
+}
+
 // 插件初始化
 jQuery(async () => {
     try {
-        logInfo("初始化Prompt结构导出增强版插件...");
+        logInfo("初始化Prompt结构导出插件...");
         
         // 创建设置UI
         const settingsHtml = `
         <div id="prompt_structure_exporter" class="prompt-exporter-settings">
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
-                    <b>Prompt结构导出增强版</b>
+                    <b>Prompt结构导出插件</b>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
@@ -189,6 +418,7 @@ jQuery(async () => {
                         <div class="prompt-exporter-info">
                             <p>使用方法: 启用插件后，发送一条消息，然后点击"导出最新提示词结构"按钮。</p>
                             <p>如果发生错误或者无法捕获提示词结构，请开启调试模式并查看控制台输出。</p>
+                            <p>插件使用ReplyHandler接口捕获提示词结构，不会干扰正常的API请求流程。</p>
                         </div>
                     </div>
                     <hr class="sysHR" />
@@ -205,247 +435,21 @@ jQuery(async () => {
         $("#prompt_exporter_debug").on("input", onDebugModeChange);
         $("#prompt_exporter_export").on("click", onExportButtonClick);
         
-        // 注册插件API处理器
-        registerPluginAPI();
+        // 定义插件API
+        definePluginAPI();
+        
+        // 设置事件监听器
+        setupEventListeners();
+        
+        // 创建调试面板
+        createDebugPanel();
         
         // 加载设置
         loadSettings();
         
-        logInfo("Prompt结构导出增强版插件初始化完成");
+        logInfo("Prompt结构导出插件初始化完成");
         
     } catch (error) {
-        logError("初始化插件时出错", error);
+        logError(`初始化插件时出错: ${error.message}`, error);
     }
 });
-
-/**
- * 核心功能：注册插件API，用于捕获prompt_struct
- */
-function registerPluginAPI() {
-    try {
-        // 确保全局变量存在
-        window.SillyTavern = window.SillyTavern || {};
-        window.SillyTavern.Extensions = window.SillyTavern.Extensions || {};
-        
-        // 定义插件接口
-        window.SillyTavern.Extensions[extensionName] = {
-            // 插件接口定义
-            interfaces: {
-                chat: {
-                    // 添加GetPrompt处理器，这将在buildPromptStruct过程中被调用
-                    GetPrompt: async (arg, prompt_struct, detail_level) => {
-                        if (!extension_settings[extensionName].enabled) {
-                            return { text: [], additional_chat_log: [], extension: {} };
-                        }
-
-                        try {
-                            const debugMode = extension_settings[extensionName].debugMode;
-                            
-                            // 记录完整的prompt_struct
-                            if (debugMode) {
-                                logInfo("GetPrompt被调用，捕获到完整的prompt_struct");
-                                console.log("完整的prompt_struct:", prompt_struct);
-                                
-                                // 检查结构完整性
-                                if (prompt_struct) {
-                                    if (prompt_struct.char_prompt) {
-                                        logInfo(`角色提示词: ${JSON.stringify(prompt_struct.char_prompt.text?.length || 0)} 个文本段落`);
-                                    }
-                                    
-                                    if (prompt_struct.user_prompt) {
-                                        logInfo(`用户提示词: ${JSON.stringify(prompt_struct.user_prompt.text?.length || 0)} 个文本段落`);
-                                    }
-                                    
-                                    if (prompt_struct.world_prompt) {
-                                        logInfo(`世界提示词: ${JSON.stringify(prompt_struct.world_prompt.text?.length || 0)} 个文本段落`);
-                                    }
-                                    
-                                    // 检查聊天记录
-                                    if (prompt_struct.chat_log) {
-                                        logInfo(`聊天记录: ${prompt_struct.chat_log.length} 条消息`);
-                                        
-                                        // 检查角色定义问题
-                                        const problemEntries = prompt_struct.chat_log.filter(entry => !entry.role || entry.role === 'undefined');
-                                        if (problemEntries.length > 0) {
-                                            logWarning(`发现 ${problemEntries.length} 条没有角色定义的聊天记录项`);
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // 保存最新的提示词数据
-                            lastExportData = {
-                                timestamp: new Date().toISOString(),
-                                prompt_structure: prompt_struct,
-                                request_arguments: arg
-                            };
-                            
-                            // 如果启用了自动导出，则自动导出
-                            if (extension_settings[extensionName].autoExport) {
-                                logInfo("自动导出已启用，正在导出数据...");
-                                exportPromptStructure(lastExportData);
-                            }
-                            
-                            // 返回空的single_part_prompt_t，不影响原有提示词
-                            return { text: [], additional_chat_log: [], extension: {} };
-                        } catch (error) {
-                            logError("处理提示词时出错", error);
-                            return { text: [], additional_chat_log: [], extension: {} };
-                        }
-                    }
-                }
-            }
-        };
-        
-        // 尝试监听可能通过事件暴露的提示词结构
-        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, (eventData) => {
-            if (!extension_settings[extensionName].enabled) {
-                return;
-            }
-            
-            const debugMode = extension_settings[extensionName].debugMode;
-            
-            if (debugMode) {
-                logInfo("CHAT_COMPLETION_PROMPT_READY事件触发");
-                console.log("事件数据:", eventData);
-            }
-            
-            // 如果lastExportData还没有被设置(通过插件API)，尝试从事件中提取
-            if (!lastExportData && eventData && eventData.prompt_struct) {
-                logInfo("从事件中提取到提示词结构");
-                lastExportData = {
-                    timestamp: new Date().toISOString(),
-                    prompt_structure: eventData.prompt_struct,
-                    event_source: "CHAT_COMPLETION_PROMPT_READY"
-                };
-                
-                if (extension_settings[extensionName].autoExport) {
-                    exportPromptStructure(lastExportData);
-                }
-            }
-        });
-        
-        // 安装文件系统API钩子
-        hookFileSystem();
-        
-        logInfo("插件API和事件监听器注册完成");
-    } catch (error) {
-        logError("注册插件API时出错", error);
-    }
-}
-
-/**
- * 尝试钩住关键文件系统函数以捕获提示词结构
- */
-function hookFileSystem() {
-    try {
-        const originalSendRequest = window.sendRequest || window.fetch;
-        
-        // 替换全局的sendRequest函数(如果存在)
-        if (window.sendRequest) {
-            window.sendRequest = async function(endpoint, data, callback) {
-                const debugMode = extension_settings[extensionName].enabled && extension_settings[extensionName].debugMode;
-                
-                // 如果是生成请求，并且包含prompt_struct
-                if (endpoint.includes("/generate") && data && (data.prompt_struct || data.promptStruct)) {
-                    if (debugMode) {
-                        logInfo(`检测到生成请求: ${endpoint}`);
-                        console.log("请求数据:", data);
-                    }
-                    
-                    const promptStruct = data.prompt_struct || data.promptStruct;
-                    if (promptStruct) {
-                        logInfo("从请求中捕获到提示词结构");
-                        lastExportData = {
-                            timestamp: new Date().toISOString(),
-                            prompt_structure: promptStruct,
-                            request_endpoint: endpoint,
-                            request_data: data
-                        };
-                        
-                        if (extension_settings[extensionName].autoExport) {
-                            exportPromptStructure(lastExportData);
-                        }
-                    }
-                }
-                
-                // 调用原始函数
-                return originalSendRequest.apply(this, arguments);
-            };
-            
-            logInfo("sendRequest函数钩子安装完成");
-        }
-        
-        // 替换全局的fetch函数
-        window.fetch = async function(resource, options) {
-            const debugMode = extension_settings[extensionName].enabled && extension_settings[extensionName].debugMode;
-            
-            // 如果是POST请求，尝试检查请求体
-            if (options && options.method === 'POST' && options.body) {
-                const url = typeof resource === 'string' ? resource : resource.url;
-                
-                // 如果是生成API请求
-                if (url.includes("/generate") || url.includes("/chat-completions")) {
-                    try {
-                        let requestData;
-                        
-                        // 处理不同类型的请求体
-                        if (typeof options.body === 'string') {
-                            requestData = JSON.parse(options.body);
-                        } else if (options.body instanceof FormData) {
-                            // 处理FormData
-                            for (const pair of options.body.entries()) {
-                                if (pair[0] === 'data' || pair[0] === 'prompt_struct') {
-                                    try {
-                                        requestData = JSON.parse(pair[1]);
-                                    } catch (e) {
-                                        // 忽略解析错误
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if (debugMode) {
-                            logInfo(`检测到API请求: ${url}`);
-                            console.log("请求数据:", requestData);
-                        }
-                        
-                        // 提取提示词结构
-                        if (requestData) {
-                            const promptStruct = requestData.prompt_struct || 
-                                                requestData.promptStruct || 
-                                                requestData.prompt || 
-                                                requestData.data?.prompt_struct;
-                                                
-                            if (promptStruct) {
-                                logInfo("从fetch请求中捕获到提示词结构");
-                                lastExportData = {
-                                    timestamp: new Date().toISOString(),
-                                    prompt_structure: promptStruct,
-                                    request_url: url,
-                                    request_data: requestData
-                                };
-                                
-                                if (extension_settings[extensionName].autoExport) {
-                                    exportPromptStructure(lastExportData);
-                                }
-                            }
-                        }
-                    } catch (error) {
-                        if (debugMode) {
-                            logWarning(`解析fetch请求数据时出错: ${error.message}`);
-                        }
-                    }
-                }
-            }
-            
-            // 调用原始fetch函数
-            return originalSendRequest.apply(this, arguments);
-        };
-        
-        logInfo("fetch函数钩子安装完成");
-        
-    } catch (error) {
-        logError("安装文件系统钩子时出错", error);
-    }
-}
