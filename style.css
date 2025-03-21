@@ -45,3 +45,57 @@
 .prompt-exporter-info p {
     margin: 5px 0;
 }
+
+/* 调试面板样式 */
+.prompt-exporter-debug-panel {
+    position: fixed;
+    top: 50px;
+    right: 20px;
+    width: 500px;
+    max-height: 80vh;
+    background-color: #222;
+    border: 1px solid #444;
+    border-radius: 5px;
+    z-index: 9999;
+    overflow: auto;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+}
+
+.prompt-exporter-debug-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background-color: #333;
+    border-bottom: 1px solid #444;
+}
+
+.prompt-exporter-debug-header h3 {
+    margin: 0;
+    color: #eee;
+    font-size: 16px;
+}
+
+.prompt-exporter-debug-close {
+    background: none;
+    border: none;
+    color: #aaa;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+.prompt-exporter-debug-close:hover {
+    color: #fff;
+}
+
+.prompt-exporter-debug-content {
+    padding: 10px;
+    font-size: 12px;
+}
+
+.prompt-exporter-debug-content pre {
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: #ddd;
+    margin: 0;
+}
