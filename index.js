@@ -1,244 +1,252 @@
 import { extension_settings, loadExtensionSettings } from "../../../extensions.js";
-import { saveSettingsDebounced, eventSource, event_types, power_user } from "../../../../script.js";
-import { getRequestHeaders } from "../../../../script.js";
+import { saveSettingsDebounced, eventSource, event_types } from "../../../../script.js";
 import { callPopup } from "../../../../script.js";
+import { generateFilename } from "../../../utils.js";
 
-const extensionName = "prompt-exporter";
-const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+// 插件名称和设置定义
+const extensionName = "prompt-struct-exporter";
 const defaultSettings = {
     enabled: true,
-    exportPath: "exports",
-    logToConsole: false,
     autoExport: false,
-    includeTimestamp: true,
-    exportMetadata: true
+    exportDirectory: "",
+    lastExportPath: "",
 };
 
-// 初始化插件设置
-function loadSettings() {
+// 初始化日志函数
+function logDebug(...args) {
+    if (extension_settings[extensionName].debugMode) {
+        console.log(`[${extensionName}]`, ...args);
+    }
+}
+
+function logError(...args) {
+    console.error(`[${extensionName}]`, ...args);
+}
+
+// 清除无法序列化的内容
+function sanitizeForJSON(obj) {
+    if (obj === null || obj === undefined) return obj;
+    
+    if (typeof obj === 'function') return '[Function]';
+    
+    if (typeof obj !== 'object') return obj;
+    
+    if (Array.isArray(obj)) {
+        return obj.map(item => sanitizeForJSON(item));
+    }
+    
+    // 处理对象
+    const result = {};
+    for (const [key, value] of Object.entries(obj)) {
+        try {
+            if (key === 'extension' && Object.keys(value).length === 0) {
+                result[key] = {};
+                continue;
+            }
+            
+            // 跳过一些特殊对象
+            if (value instanceof Element || value instanceof Window) {
+                result[key] = '[DOM Element]';
+                continue;
+            }
+            
+            // 跳过函数和Buffer
+            if (typeof value === 'function') {
+                result[key] = '[Function]';
+                continue;
+            }
+            
+            // 处理Buffer或类Buffer对象
+            if (value?.type === 'Buffer' || (value?.buffer && value?.byteLength)) {
+                result[key] = '[Buffer Data]';
+                continue;
+            }
+            
+            result[key] = sanitizeForJSON(value);
+        } catch (error) {
+            result[key] = `[Error: ${error.message}]`;
+        }
+    }
+    
+    return result;
+}
+
+// 导出提示结构
+function exportPromptStruct(promptStruct) {
+    try {
+        logDebug("开始导出提示结构");
+        if (!promptStruct) {
+            logError("尝试导出空的提示结构");
+            throw new Error("没有可导出的提示结构数据");
+        }
+        
+        // 清理数据，确保可以序列化
+        const sanitizedData = sanitizeForJSON(promptStruct);
+        
+        // 准备JSON数据
+        const jsonData = JSON.stringify(sanitizedData, null, 2);
+        
+        // 创建Blob和下载链接
+        const blob = new Blob([jsonData], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        // 准备文件名
+        const charName = promptStruct.Charname || "unknown";
+        const username = promptStruct.UserCharname || "user";
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `prompt_struct_${charName}_${username}_${timestamp}.json`;
+        
+        // 创建下载链接并触发
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        
+        // 清理
+        setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 100);
+        
+        // 更新最后导出路径
+        extension_settings[extensionName].lastExportPath = filename;
+        saveSettingsDebounced();
+        
+        logDebug("提示结构导出成功", filename);
+        toastr.success(`Prompt结构已导出到: ${filename}`, "导出成功");
+        
+        return { success: true, filename };
+    } catch (error) {
+        logError("导出提示结构失败", error);
+        toastr.error(`导出失败: ${error.message}`, "错误");
+        return { success: false, error: error.message };
+    }
+}
+
+// 加载插件设置
+async function loadSettings() {
+    // 初始化设置项
     extension_settings[extensionName] = extension_settings[extensionName] || {};
     if (Object.keys(extension_settings[extensionName]).length === 0) {
         Object.assign(extension_settings[extensionName], defaultSettings);
     }
     
-    // 确保所有默认设置都存在
-    for (const key in defaultSettings) {
-        if (extension_settings[extensionName][key] === undefined) {
-            extension_settings[extensionName][key] = defaultSettings[key];
-        }
-    }
+    $('#prompt_exporter_enabled').prop('checked', extension_settings[extensionName].enabled);
+    $('#prompt_exporter_auto_export').prop('checked', extension_settings[extensionName].autoExport);
+    $('#prompt_exporter_debug_mode').prop('checked', extension_settings[extensionName].debugMode);
 }
 
-// 导出Prompt数据
-async function exportPromptData(promptData) {
-    try {
-        if (!extension_settings[extensionName].enabled) {
-            console.log("[Prompt导出工具] 插件已禁用，不导出数据");
-            return;
-        }
+let lastChatData = null;
 
-        // 记录日志
-        if (extension_settings[extensionName].logToConsole) {
-            console.log("[Prompt导出工具] 收到的Prompt数据:", promptData);
-        }
-
-        // 准备导出数据
-        const exportData = {
-            timestamp: new Date().toISOString(),
-            metadata: extension_settings[extensionName].exportMetadata ? {
-                powerUserSettings: {
-                    contextSize: power_user.max_context,
-                    responseLength: power_user.max_response_length,
-                    // 其他可能有用的设置
-                }
-            } : undefined,
-            promptData: promptData
-        };
-
-        if (!extension_settings[extensionName].includeTimestamp) {
-            delete exportData.timestamp;
-        }
-
-        // 格式化文件名
-        const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
-        const fileName = `prompt_data_${timestamp}.json`;
+// 注册事件监听器
+function registerEventListeners() {
+    // 监听提示词准备好事件
+    eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, (data) => {
+        logDebug("提示词准备好事件触发", data ? "有数据" : "无数据");
+        lastChatData = data;
         
-        // 发送到服务器保存
-        const response = await fetch('/api/save_prompt', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                fileName: fileName,
-                exportPath: extension_settings[extensionName].exportPath,
-                data: exportData
-            })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            toastr.success(`成功导出Prompt数据到: ${result.path}`, 'Prompt导出工具');
-            
-            // 如果设置了自动导出，则不弹出下载对话框
-            if (!extension_settings[extensionName].autoExport) {
-                // 创建下载链接
-                const downloadUrl = `/api/download_prompt?fileName=${encodeURIComponent(fileName)}&exportPath=${encodeURIComponent(extension_settings[extensionName].exportPath)}`;
-                const confirmResult = await callPopup("<h3>Prompt数据已导出</h3><p>点击确定下载文件，或取消关闭此对话框</p>", 'confirm');
-                
-                if (confirmResult) {
-                    // 创建并触发下载链接
-                    const a = document.createElement('a');
-                    a.href = downloadUrl;
-                    a.download = fileName;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                }
-            }
-        } else {
-            toastr.error(`导出Prompt数据失败: ${result.error || '未知错误'}`, 'Prompt导出工具');
+        // 如果启用了自动导出，则直接导出
+        if (extension_settings[extensionName].enabled && extension_settings[extensionName].autoExport) {
+            exportPromptStruct(data);
         }
-    } catch (error) {
-        console.error("[Prompt导出工具] 导出过程中发生错误:", error);
-        toastr.error(`导出过程中发生错误: ${error.message || error}`, 'Prompt导出工具');
-    }
+    });
 }
 
-// 创建插件UI
-function createUI() {
+// 主入口函数
+jQuery(async () => {
+    logDebug("插件初始化中");
+    
+    // 创建UI
     const settingsHtml = `
-    <div id="prompt_exporter_settings" class="prompt-exporter-settings">
+    <div class="prompt-struct-exporter-settings">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Prompt导出工具</b>
+                <b>Prompt结构导出器</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
-                <div class="prompt-exporter-block flex-container">
-                    <label class="checkbox_label">
-                        <input id="prompt_exporter_enabled" type="checkbox" ${extension_settings[extensionName].enabled ? 'checked' : ''}>
-                        <span>启用插件</span>
+                <div class="flex-container">
+                    <label class="flex-container">
+                        <input id="prompt_exporter_enabled" type="checkbox">
+                        <span>启用导出功能</span>
                     </label>
                 </div>
-                <div class="prompt-exporter-block flex-container">
-                    <label class="checkbox_label">
-                        <input id="prompt_exporter_log_console" type="checkbox" ${extension_settings[extensionName].logToConsole ? 'checked' : ''}>
-                        <span>记录到控制台</span>
+                <div class="flex-container">
+                    <label class="flex-container">
+                        <input id="prompt_exporter_auto_export" type="checkbox">
+                        <span>自动导出每次生成的提示结构</span>
                     </label>
                 </div>
-                <div class="prompt-exporter-block flex-container">
-                    <label class="checkbox_label">
-                        <input id="prompt_exporter_auto_export" type="checkbox" ${extension_settings[extensionName].autoExport ? 'checked' : ''}>
-                        <span>自动导出(不弹出下载对话框)</span>
+                <div class="flex-container">
+                    <label class="flex-container">
+                        <input id="prompt_exporter_debug_mode" type="checkbox">
+                        <span>调试模式（日志详细）</span>
                     </label>
                 </div>
-                <div class="prompt-exporter-block flex-container">
-                    <label class="checkbox_label">
-                        <input id="prompt_exporter_timestamp" type="checkbox" ${extension_settings[extensionName].includeTimestamp ? 'checked' : ''}>
-                        <span>包含时间戳</span>
-                    </label>
+                <div class="flex-container">
+                    <input id="export_prompt_struct_button" class="menu_button" type="button" value="导出最近的提示结构" />
                 </div>
-                <div class="prompt-exporter-block flex-container">
-                    <label class="checkbox_label">
-                        <input id="prompt_exporter_metadata" type="checkbox" ${extension_settings[extensionName].exportMetadata ? 'checked' : ''}>
-                        <span>包含元数据</span>
-                    </label>
+                <div id="last_export_info" class="flex-container" style="font-size: 0.8em; margin-top: 10px; display: none;">
+                    <span>最后导出: </span>
+                    <span id="last_export_path"></span>
                 </div>
-                <div class="prompt-exporter-block flex-container">
-                    <label for="prompt_exporter_path">导出路径:</label>
-                    <input id="prompt_exporter_path" type="text" value="${extension_settings[extensionName].exportPath}">
-                </div>
-                <div class="prompt-exporter-block flex-container flex-justify-center">
-                    <input id="prompt_exporter_test" class="menu_button" type="button" value="测试导出" />
-                </div>
-                <hr class="sysHR">
+                <hr class="sysHR" />
             </div>
         </div>
     </div>`;
-
-    $('#extensions_settings').append(settingsHtml);
     
-    // 添加事件监听器
-    $('#prompt_exporter_enabled').on('change', function() {
+    // 添加设置到扩展设置区域
+    $("#extensions_settings").append(settingsHtml);
+    
+    // 绑定UI事件
+    $("#prompt_exporter_enabled").on("input", function() {
         extension_settings[extensionName].enabled = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
     
-    $('#prompt_exporter_log_console').on('change', function() {
-        extension_settings[extensionName].logToConsole = !!$(this).prop('checked');
-        saveSettingsDebounced();
-    });
-    
-    $('#prompt_exporter_auto_export').on('change', function() {
+    $("#prompt_exporter_auto_export").on("input", function() {
         extension_settings[extensionName].autoExport = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
     
-    $('#prompt_exporter_timestamp').on('change', function() {
-        extension_settings[extensionName].includeTimestamp = !!$(this).prop('checked');
+    $("#prompt_exporter_debug_mode").on("input", function() {
+        extension_settings[extensionName].debugMode = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
     
-    $('#prompt_exporter_metadata').on('change', function() {
-        extension_settings[extensionName].exportMetadata = !!$(this).prop('checked');
-        saveSettingsDebounced();
-    });
-    
-    $('#prompt_exporter_path').on('input', function() {
-        extension_settings[extensionName].exportPath = $(this).val();
-        saveSettingsDebounced();
-    });
-    
-    $('#prompt_exporter_test').on('click', function() {
-        exportPromptData({
-            test: true,
-            timestamp: Date.now(),
-            message: "这是一个测试导出"
-        });
-    });
-}
-
-// 添加服务器API路由
-async function addServerRoutes() {
-    try {
-        const response = await fetch('/api/add_prompt_exporter_routes', {
-            method: 'POST',
-            headers: getRequestHeaders()
-        });
+    // 导出按钮点击事件
+    $("#export_prompt_struct_button").on("click", function() {
+        if (!extension_settings[extensionName].enabled) {
+            toastr.warning("请先启用导出功能", "提示");
+            return;
+        }
         
-        const result = await response.json();
-        if (!result.success) {
-            console.error("[Prompt导出工具] 添加服务器路由失败:", result.error);
-            toastr.error(`无法添加服务器路由: ${result.error}`, 'Prompt导出工具');
-        } else {
-            console.log("[Prompt导出工具] 服务器路由添加成功");
+        if (!lastChatData) {
+            toastr.error("没有可用的提示结构数据，请先发送消息", "错误");
+            return;
         }
-    } catch (error) {
-        console.error("[Prompt导出工具] 添加服务器路由时出错:", error);
-        toastr.error(`添加服务器路由时出错: ${error.message || error}`, 'Prompt导出工具');
-    }
-}
-
-// 插件初始化
-jQuery(async () => {
-    loadSettings();
-    createUI();
-    await addServerRoutes();
-    
-    // 监听CHAT_COMPLETION_PROMPT_READY事件来获取prompt数据
-    eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (data) => {
-        try {
-            if (!extension_settings[extensionName].enabled) return;
-            
-            // 获取生成的提示数据
-            if (data && data.chat) {
-                console.log("[Prompt导出工具] 捕获到Chat Completion Prompt数据");
-                await exportPromptData(data);
-            } else {
-                console.warn("[Prompt导出工具] 收到的数据格式不正确:", data);
-            }
-        } catch (error) {
-            console.error("[Prompt导出工具] 处理事件时出错:", error);
+        
+        exportPromptStruct(lastChatData);
+        
+        // 显示最后导出信息
+        if (extension_settings[extensionName].lastExportPath) {
+            $("#last_export_path").text(extension_settings[extensionName].lastExportPath);
+            $("#last_export_info").show();
         }
     });
+    
+    // 加载设置
+    await loadSettings();
+    
+    // 注册事件
+    registerEventListeners();
+    
+    // 初始化UI状态
+    if (extension_settings[extensionName].lastExportPath) {
+        $("#last_export_path").text(extension_settings[extensionName].lastExportPath);
+        $("#last_export_info").show();
+    }
+    
+    logDebug("插件初始化完成");
 });
